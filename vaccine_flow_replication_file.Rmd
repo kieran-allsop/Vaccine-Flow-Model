@@ -1,0 +1,848 @@
+---
+title: Modeling Protection from COVID-19 Based on Vaccine Supply and Administration
+  Rates
+author: "Kieran Allsop, James C. Capretta, and Scott Ganz"
+date: "2/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(readr)
+library(stringr)
+library(purrr)
+library(ggthemes)
+library(ggplot2)
+library(scales)
+```
+
+## Introduction
+
+This Markdown file replicates the stock and flow model used by Kieran Allsop, James C. Capretta, and Scott Ganz in the AEI Economic Perspectives publication [Modeling Protection from COVID-19 Based on Vaccine Supply and Administration](). The code was originally run on R.4.0.1. Updated versions of R may have been released since this replication file was written.
+
+Note that data for the model updates daily and as such estimations may change over time. The model provided is meant to provide a snapshot of the current situation. Current values are correct as of 02/16/2021, the date from which data was taken for the report.
+
+You will need to install the following packages into R to run this code:
+
+* dplyr
+* tidyr
+* lubridate
+* readr
+* ggplot2
+* ggthemes
+* stringr
+* scales
+* purrr
+
+## Initialize Objects and Set Parameters
+
+First, initialize the objects needed to store data, and set parameters for population and time for your model.
+
+```{r initialize}
+## -- INITIALIZE OBJECTS -- ##
+stock <- list()
+deliveries <- list()
+schedule <- list()
+outcomes <- list()
+vaccinations <- list()
+
+## -- SET PARAMETERS -- ##
+weeks <- 33
+start_date <- "2021-02-15"
+US_population <- 328239523
+
+```
+
+## Set Initializing Data Points
+
+Data on current vaccination figures is provided by the [CDC](https://covid.cdc.gov/covid-data-tracker/#vaccinations). Shipment schedules for [Moderna](https://data.cdc.gov/Vaccinations/COVID-19-Vaccine-Distribution-Allocations-by-Juris/b7pe-5nws) and [Pfizer-BioNTech](https://data.cdc.gov/Vaccinations/COVID-19-Vaccine-Distribution-Allocations-by-Juris/saz5-9hgg) are also provided by the CDC. 
+
+```{r initial_data}
+# Read in Moderna shipment schedule
+moderna_shipping <-
+  read_csv(
+    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Moderna.csv"
+  ) %>%
+  filter(Jurisdiction == "Total") %>%
+  select(-1,-2) %>%
+  mutate_all( ~ str_replace_all(., ",", "") %>% as.numeric)
+
+# Read in Pfizer shipment schedule
+pfizer_shipping <-
+  read_csv(
+    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Pfizer.csv"
+  ) %>%
+  filter(Jurisdiction == "Total") %>%
+  select(-1,-2) %>%
+  mutate_all( ~ str_replace_all(., ",", "") %>% as.numeric)
+
+# Input column numbers of weeks still due to receive second doses 
+# (3wks for Pfizer, 4 wks for Moderna)
+pfizer_second <-
+  pfizer_shipping[, c(14, 16, 18)] %>% unlist(use.names = F)
+moderna_second <-
+  moderna_shipping[, c(10, 12, 14, 16)] %>% unlist(use.names = F)
+
+# Add they scheduled second doses to a new "schedule" object
+schedule[[1]] <- list()
+schedule[[1]][["pfizer"]] <- tibble(week = c(1, 2, 3),
+                                    people = pfizer_shipping[, c(14, 16, 18)] %>% unlist(use.names = F))
+schedule[[1]][["moderna"]] <- tibble(week = c(1, 2, 3, 4),
+                                     people = pfizer_shipping[, c(10, 12, 14, 16)] %>% unlist(use.names = F))
+
+# Input initialization values from the CDC
+# Up to date as of 02/16/21
+doses_delivered0 <- 71657975
+doses_administered0 <- 55220364
+doses_administered_pfizer0 <- 28374410
+doses_administered_moderna0 <- 26738383
+doses_administered_unknown0 <- 107751
+people_fully_vaccinated0 <- 15015434
+people_partially_vaccinated0 <- 39670551 - people_fully_vaccinated0
+doses_stock0 <- doses_delivered0 - doses_administered0
+doses_scheduled_pfizer0 <- sum(schedule[[1]][["pfizer"]]$people)
+doses_scheduled_moderna0 <- sum(schedule[[1]][["moderna"]]$people)
+
+# Calculate doses delivered and doses in stock for each of the respectives vaccine candidates
+doses_delivered_pfizer0 <-
+  doses_delivered0 * doses_administered_pfizer0 / (doses_administered_moderna0 + doses_administered_pfizer0)
+doses_delivered_moderna0 <-
+  doses_delivered0 * doses_administered_moderna0 / (doses_administered_moderna0 + doses_administered_pfizer0)
+doses_stock_pfizer0 <-
+  doses_scheduled_pfizer0 + (doses_stock0 - doses_scheduled_moderna0 - doses_scheduled_pfizer0) * doses_administered_moderna0 /
+  (doses_administered_moderna0 + doses_administered_pfizer0)
+doses_stock_moderna0 <-
+  doses_scheduled_moderna0 + (doses_stock0 - doses_scheduled_moderna0 - doses_scheduled_pfizer0) * doses_administered_pfizer0 /
+  (doses_administered_moderna0 + doses_administered_pfizer0)
+
+```
+
+## Set up Future Delivery Schedules
+
+Pfizer-BioNTech, Moderna, and Johnson & Johnson have all announced deadlines for deliveries of certain amounts of doses of their vaccines. Set those here.
+
+```{r delivery_schedule}
+## -- FLOW -- ##
+
+# When deliveries are spread over time, assume that the roll out is evenly 
+# distributed unless otherwise noted
+
+p1 <- 7     # Present - Mar 31 (Q1)
+p2 <- 8     # Mar 31 - May 31
+p3 <- 9     # May 31 - July 31
+p1jj <- 2   # Mar 15 - Mar 31
+p2jj <- 4   # Mar 31 - Apr 30
+p3jj <- 9   # Apr 30 - Jun 30
+Endjj <- weeks - p1jj - p2jj - p3jj - 6
+End <- weeks - p1 - p2 - p3
+
+## -- PFIZER -- ##
+# Current schedule: 120MM in Q1, 200MM by May 31, 300MM by Jul 31
+doses_weekly_pfizer_p1 <- (120 * 10 ^ 6 - doses_delivered_pfizer0) / p1
+doses_weekly_pfizer_p2 <- (80 * 10 ^ 6) / p2
+doses_weekly_pfizer_p3 <- (100 * 10 ^ 6) / p3
+deliveries[["pfizer"]] <- tibble(week = 1:weeks,
+                                 doses = c(
+                                   rep(doses_weekly_pfizer_p1, p1),
+                                   rep(doses_weekly_pfizer_p2, p2),
+                                   rep(doses_weekly_pfizer_p3, p3),
+                                   rep(0, End)
+                                 ))
+
+## -- MODERNA -- ##
+# Current schedule: 100MM in Q1, 200MM by May 31, 300MM by Jul 31
+doses_weekly_moderna_p1 <- (100 * 10 ^ 6 - doses_delivered_moderna0) / p1
+doses_weekly_moderna_p2 <- 100 * 10 ^ 6 / p2
+doses_weekly_moderna_p3 <- 100 * 10 ^ 6 / p3
+deliveries[["moderna"]] <- tibble(week = 1:weeks,
+                                  doses = c(
+                                    rep(doses_weekly_moderna_p1, p1),
+                                    rep(doses_weekly_moderna_p2, p2),
+                                    rep(doses_weekly_moderna_p3, p3),
+                                    rep(0, End)
+                                  ))
+
+## -- WITHOUT JOHNSON & JOHNSON -- ##
+# Current schedule: 7MM by Mar 31, 20MM by Apr 30, 100MM by Jun 30
+doses_weekly_jj_p1 <- 0 / p1jj
+doses_weekly_jj_p2 <- 0 / p2jj
+doses_weekly_jj_p3 <- 0 / p3jj
+deliveries[["jj"]] <- tibble(week = 1:weeks,
+                             doses = c(rep(0, 6),
+                                       rep(doses_weekly_jj_p1, p1jj),
+                                       rep(doses_weekly_jj_p2, p2jj),
+                                       rep(doses_weekly_jj_p3, p3jj),
+                                       rep(0, Endjj)
+                                       ))
+```
+
+## Set Up Capacity Constraints
+
+Different scenarios are built on different capacity constraints. The current rate of increase in daily vaccinations is calculated using data from [Our World in Data](https://github.com/owid/covid-19-data/tree/master/public/data/vaccinations). Current capacity is taken from [Bloomberg](https://www.bloomberg.com/graphics/covid-vaccine-tracker-global-distribution/).
+
+```{r capacity_constraints}
+## -- CAPACITY CONSTRAINTS -- ##
+
+# Current capacity: up to date as of 02/16/21
+capacity0 <- 1.67 * 10^6
+
+# Calculate growth rate
+owid_url <-
+  "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/us_state_vaccinations.csv"
+owid_data <-
+  read_csv(
+    url(
+      owid_url <-
+        "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/us_state_vaccinations.csv"
+    )
+  ) %>%
+  filter(location == "United States",!is.na(daily_vaccinations)) %>%
+  select(date, total_vaccinations, daily_vaccinations) %>%
+  filter(date >= ymd("2021-01-01")) %>%
+  mutate(day = 1:n())
+
+rate <- coef(lm(daily_vaccinations ~ day, data = owid_data))[2]
+rm(owid_url, owid_data)
+
+## -- DIFF. MAX CAPCITY CEILINGS -- ##
+
+# Max capacity: 3 million/day (Base Case)
+capacity3 <- tibble(week = 1:weeks) %>%
+  mutate(
+    daily_capacity = capacity0 + (7 * rate) * week,
+    daily_capacity = ifelse(daily_capacity > 3 * 10 ^ 6, 3 * 10 ^
+                              6, daily_capacity),
+    weekly_capacity = daily_capacity * 7
+  )
+
+# Max capacity: 3.5 million/day (High Case)
+capacity35 <- tibble(week = 1:weeks) %>%
+  mutate(
+    daily_capacity = capacity0 + (7 * rate) * week,
+    daily_capacity = ifelse(daily_capacity > 3.5 * 10 ^ 6, 3.5 * 10 ^
+                              6, daily_capacity),
+    weekly_capacity = daily_capacity * 7
+  )
+
+# Max capacity: 2.5 million/day (Low Case)
+capacity25 <- tibble(week = 1:weeks) %>%
+  mutate(
+    daily_capacity = capacity0 + (7 * rate) * week,
+    daily_capacity = ifelse(daily_capacity > 2.5 * 10 ^ 6, 2.5 * 10 ^
+                              6, daily_capacity),
+    weekly_capacity = daily_capacity * 7
+  )
+
+# Max capacity: current capacity
+capacitynow <- tibble(week=1:weeks) %>%
+  mutate(daily_capacity = capacity0,
+         weekly_capacity = daily_capacity * 7)
+
+# J&J Max capacity: 1 million/day (Only for J&J)
+capacityjj <- tibble(week = 1:weeks) %>%
+  mutate(daily_capacity = 1 * 10^6,
+         weekly_capacity = daily_capacity * 7)
+```
+
+## Final Objects to Initialize
+
+Finally, initialize a stock object to store data on the total stock and a population object to keep track of how many people have had a vaccine and how many doses they've had.
+
+```{r initialize2}
+## -- STOCK -- ##
+stock <- list()
+stock[[1]] <- list()
+stock[[1]][["moderna"]] <- doses_stock_moderna0
+stock[[1]][["pfizer"]] <- doses_stock_pfizer0
+stock[[1]][["jj"]] <- 0
+
+## -- POPULATION CONSTRAINT -- ##
+people <- list()
+people[[1]] <- list()
+people[[1]][["partial"]] <- people_partially_vaccinated0
+people[[1]][["completed"]] <- people_fully_vaccinated0
+people[[1]][["unprotected"]] <- US_population - people[[1]][["completed"]] - people[[1]][["partial"]]
+```
+
+## Create Functions for the Model
+
+These functions will be used to update objects as the model processes each week.
+
+* **init_vaccinations**: This function compiles all data for the week in the object 'vaccinations' including stock at the beginning of the week, deliveries at the start of that week, capacity for that week, and the schedule of people requiring second doses that week. It also creates an 'administration' list within the 'vaccination' object.
+* **give_vaccinations**: Based on capacity, deliveries, and the schedule of people needing second doses, this function decides how many vaccinations to give out and of what type.
+* **update_schedule**: This function updates the number of people needing second shots of either of the two mRNA vaccines in the coming weeks.
+* **check_pop_limits**: This function checks to make sure we have not vaccinated more people than there is in the population and corrects administration numbers if we have.
+* **update_stock**: This function updates the number of doses of each type of vaccine in the current stock.
+* **update_people**: This function updates the 'people' object that tells us how many people are completely vaccinated, how many are partially vaccinated, and how many people are still unprotected.
+* **update_outcomes**: This function collects the relevant information for the week and stores it in the outcomes object
+* **create_outcomes_table**: This function creates the table in which all the data from each week will appear and the tables that we will make our graphs from. 
+
+```{r functions}
+## -- INITIALIZE A WEEK -- ##
+init_vaccinations = function(stock, deliveries, capacity, capacityjj, schedule, wk){
+  
+  vaccinations <- list()
+  vaccinations[["stock"]] <- list()
+  vaccinations[["stock"]][["moderna"]] <- stock[[wk]]$moderna
+  vaccinations[["stock"]][["pfizer"]] <- stock[[wk]]$pfizer
+  vaccinations[["stock"]][["jj"]] <- stock[[wk]]$jj
+  
+  vaccinations[["deliveries"]] <- list()
+  vaccinations[["deliveries"]][["moderna"]] <-
+    deliveries[["moderna"]] %>% filter(week == wk) %>% pull(doses)
+  vaccinations[["deliveries"]][["pfizer"]] <-
+    deliveries[["pfizer"]] %>% filter(week == wk) %>% pull(doses)
+  vaccinations[["deliveries"]][["jj"]] <-
+    deliveries[["jj"]] %>% filter(week == wk) %>% pull(doses)
+  
+  vaccinations[["capacity"]] <-
+    capacity %>% filter(week == wk) %>% pull(weekly_capacity)
+  vaccinations[["capacityjj"]] <-
+    capacityjj %>% filter(week == wk) %>% pull(weekly_capacity)
+  
+  vaccinations[["second_doses"]] <- list()
+  vaccinations[["second_doses"]][["moderna"]] <-
+    schedule[[wk]]$moderna %>% filter(week == wk) %>% pull(people)
+  vaccinations[["second_doses"]][["pfizer"]] <-
+    schedule[[wk]]$pfizer %>% filter(week == wk) %>% pull(people)
+  
+  vaccinations[["administration"]] <- list()
+  
+  return(vaccinations)
+}
+
+## -- GIVE MODERNA AND PFIZER VACCINATIONS -- ##
+give_vaccinations = function(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk){
+  
+  administration <- list()
+  
+  # case 1: capacity is not sufficient to cover scheduled doses - give vaccines
+  # in proportion to people waiting
+  if (vaccinations[[wk]][["capacity"]] <=
+      vaccinations[[wk]][["second_doses"]][["moderna"]] +
+      vaccinations[[wk]][["second_doses"]][["pfizer"]]) {
+
+      administration[["pfizer_second"]] <-
+        capacity * vaccinations[[wk]][["second_doses"]][["pfizer"]] /
+        (vaccinations[[wk]][["second_doses"]][["pfizer"]] +
+        vaccinations[[wk]][["second_doses"]][["moderna"]])
+      administration[["moderna_second"]] <-
+        capacity * vaccinations[[wk]][["second_doses"]][["moderna"]] /
+        (vaccinations[[wk]][["second_doses"]][["pfizer"]] +
+        vaccinations[[wk]][["second_doses"]][["moderna"]])
+      administration[["moderna_first"]] <- 0
+      administration[["pfizer_first"]] <- 0
+      
+    # J&J
+    max_jj <- (stock[[wk]][["jj"]] +
+                 deliveries[["jj"]] %>% filter(week == wk) %>% pull(doses))
+    
+    if (vaccinations[[wk]][["capacityjj"]] <= max_jj) {
+      administration[["jj"]] <- vaccinations[[wk]][["capacityjj"]]
+    }else{
+      administration[["jj"]] <- max_jj
+    }
+    
+  # case 2: if no one needs a first dose of the vaccine
+  } else if (people[[wk]]$unprotected == 0) {
+      administration[["pfizer_second"]] <-
+        vaccinations[[wk]][["second_doses"]][["pfizer"]]
+      administration[["moderna_second"]] <-
+        vaccinations[[wk]][["second_doses"]][["moderna"]]
+      administration[["pfizer_first"]] <- 0
+      administration[["moderna_first"]] <- 0
+      administration[["jj"]] <- 0
+  } else {
+      max_moderna_first <- floor((1/2) * (stock[[wk]][["moderna"]] + 
+                                          deliveries[["moderna"]] %>% 
+                                          filter(week == wk) %>% pull(doses) -
+                                          sum((schedule[[wk]][["moderna"]] %>% pull(people)))))
+    
+      max_pfizer_first <- floor((1/2) * (stock[[wk]][["pfizer"]] +
+                                          deliveries[["pfizer"]] %>% 
+                                          filter(week == wk) %>% pull(doses) -
+                                         sum((schedule[[wk]][["pfizer"]] %>% pull(people)))))
+      # case 3: if capacity is sufficient to cover scheduled doses but not the 
+      # maximum amount of first doses
+      if (vaccinations[[wk]][["capacity"]] <=
+        vaccinations[[wk]][["second_doses"]][["moderna"]] +
+        vaccinations[[wk]][["second_doses"]][["pfizer"]] +
+        max_moderna_first +
+        max_pfizer_first) {
+          administration[["pfizer_second"]] <-
+            vaccinations[[wk]][["second_doses"]][["pfizer"]]
+          administration[["moderna_second"]] <-
+            vaccinations[[wk]][["second_doses"]][["moderna"]]
+          administration[["pfizer_first"]] <-
+            (vaccinations[[wk]][["capacity"]] -
+            administration[["pfizer_second"]] -
+            administration[["moderna_second"]]) *
+            max_pfizer_first / (max_pfizer_first + max_moderna_first)
+          administration[["moderna_first"]] <-
+            (vaccinations[[wk]][["capacity"]] -
+            administration[["pfizer_second"]] -
+            administration[["moderna_second"]]) *
+            max_moderna_first / (max_pfizer_first + max_moderna_first)
+      # case 4: if capacity is sufficient to cover scheduled doses and the
+      # maximum amount of fist doses
+      } else {
+          administration[["pfizer_second"]] <-
+            vaccinations[[wk]][["second_doses"]][["pfizer"]]
+          administration[["moderna_second"]] <-
+            vaccinations[[wk]][["second_doses"]][["moderna"]]
+          administration[["pfizer_first"]] <-
+            max_pfizer_first
+          administration[["moderna_first"]] <-
+            max_moderna_first
+      }
+      
+      # J&J
+      max_jj <- (stock[[wk]][["jj"]] +
+                 deliveries[["jj"]] %>% filter(week == wk) %>% pull(doses))
+    
+      if (vaccinations[[wk]][["capacityjj"]] <= max_jj) {
+        administration[["jj"]] <- vaccinations[[wk]][["capacityjj"]]
+      }else{
+        administration[["jj"]] <- max_jj
+      }
+  }
+  
+  return(administration)
+}
+
+## -- UPDATE SCHEDULE -- ##
+update_schedule = function(schedule, vaccinations, wk){
+  
+  new_schedule <- list()
+  
+  new_schedule[["pfizer"]] <-
+    tibble(
+      week = (wk + 1):(wk + 3),
+      people = c(
+        schedule[[wk]][["pfizer"]] %>% filter(week == wk + 1) %>% pull(people),
+        schedule[[wk]][["pfizer"]] %>% filter(week == wk + 2) %>% pull(people),
+        vaccinations[[wk]][["administration"]][["pfizer_first"]]
+      )
+    )
+    
+  new_schedule[["moderna"]] <-
+    tibble(
+      week = (wk + 1):(wk + 4),
+      people = c(
+        schedule[[wk]][["moderna"]] %>% filter(week == wk + 1) %>% pull(people),
+        schedule[[wk]][["moderna"]] %>% filter(week == wk + 2) %>% pull(people),
+        schedule[[wk]][["moderna"]] %>% filter(week == wk + 3) %>% pull(people),
+        vaccinations[[wk]][["administration"]][["moderna_first"]]
+      )
+    )
+  
+  return(new_schedule)
+}
+
+## -- CHECK POPULATION LIMITS -- ##
+check_pop_limits = function(vaccinations, people, wk){
+  
+  new_administration <- list()
+  
+  if (vaccinations[[wk]][["administration"]][["jj"]] >= abs(people[[wk + 1]][["unprotected"]])) {
+    new_administration[["jj"]] <-  
+      vaccinations[[wk]][["administration"]][["jj"]] - abs(people[[wk + 1]][["unprotected"]])
+    new_administration[["pfizer_first"]] <- vaccinations[[wk]][["administration"]][["pfizer_first"]]
+    new_administration[["pfizer_second"]] <- vaccinations[[wk]][["administration"]][["pfizer_second"]]
+    new_administration[["moderna_first"]] <- vaccinations[[wk]][["administration"]][["moderna_first"]]
+    new_administration[["moderna_second"]] <- vaccinations[[wk]][["administration"]][["moderna_second"]]
+  } else if ((vaccinations[[wk]][["administration"]][["jj"]] +
+              vaccinations[[wk]][["administration"]][["pfizer_first"]]) >= 
+              abs(people[[wk + 1]][["unprotected"]])) {
+    new_administration[["pfizer_first"]] <-
+      vaccinations[[wk]][["administration"]][["pfizer_first"]] - 
+      (abs(people[[wk + 1]][["unprotected"]]) - vaccinations[[wk]][["administration"]][["jj"]])
+    new_administration[["jj"]] <- 0
+    new_administration[["pfizer_second"]] <- vaccinations[[wk]][["administration"]][["pfizer_second"]]
+    new_administration[["moderna_first"]] <- vaccinations[[wk]][["administration"]][["moderna_first"]]
+    new_administration[["moderna_second"]] <- vaccinations[[wk]][["administration"]][["moderna_second"]]
+  } else {
+    new_administration[["moderna_first"]] <-
+      vaccinations[[wk]][["administration"]][["moderna_first"]] - 
+      (abs(people[[wk + 1]][["unprotected"]]) - 
+      vaccinations[[wk]][["administration"]][["jj"]] -
+      vaccinations[[wk]][["administration"]][["pfizer_first"]])
+    new_administration[["jj"]]<- 0
+    new_administration[["pfizer_first"]] <- 0
+    new_administration[["pfizer_second"]] <- vaccinations[[wk]][["administration"]][["pfizer_second"]]
+    new_administration[["moderna_second"]] <- vaccinations[[wk]][["administration"]][["moderna_second"]]
+  }
+  
+  return(new_administration)
+}
+
+## -- UPDATE STOCK -- ##
+update_stock = function(stock, vaccinations, deliveries, wk){
+  
+  new_stock <- list()
+  
+  new_stock[["moderna"]] <- stock[[wk]][["moderna"]] -
+    vaccinations[[wk]][["administration"]][["moderna_second"]] -
+    vaccinations[[wk]][["administration"]][["moderna_first"]] +
+    (deliveries$moderna %>% filter(week == wk) %>% pull(doses))
+  
+  new_stock[["pfizer"]] <- stock[[wk]][["pfizer"]] -
+    vaccinations[[wk]][["administration"]][["pfizer_second"]] -
+    vaccinations[[wk]][["administration"]][["pfizer_first"]] +
+    (deliveries$pfizer %>% filter(week == wk) %>% pull(doses))
+  
+  new_stock[["jj"]] <- stock[[wk]][["jj"]] -
+    vaccinations[[wk]][["administration"]][["jj"]] +
+    (deliveries$jj %>% filter(week == wk) %>% pull(doses))
+  
+  return(new_stock)
+}
+
+## -- UPDATE PEOPLE -- ##
+update_people = function(people, schedule, vaccinations, US_population, wk){
+  
+  new_people <- list()
+  
+  new_people[["partial"]] <- 
+    sum(schedule[[wk + 1]][["moderna"]]$people) + sum(schedule[[wk + 1]][["pfizer"]]$people)
+  
+  new_people[["completed"]] <- people[[wk]][["completed"]] + 
+    vaccinations[[wk]][["administration"]][["pfizer_second"]] +
+    vaccinations[[wk]][["administration"]][["moderna_second"]] +
+    vaccinations[[wk]][["administration"]][["jj"]]
+  
+  new_people[["unprotected"]] <- 
+    US_population - new_people[["completed"]] - new_people[["partial"]]
+  
+  return(new_people)
+}
+
+## -- UPDATE OUTCOMES -- ##
+update_outcomes = function(outcomes, vaccinations, wk){
+  
+  new_outcomes <- list()
+  
+  new_outcomes[["doses_administered"]] <-
+    unlist(vaccinations[[wk]][["administration"]]) %>% sum
+  new_outcomes[["capacity"]] <- vaccinations[[wk]][["capacity"]]
+  new_outcomes[["capacity_utilization"]] <-
+    new_outcomes[["doses_administered"]] / vaccinations[[wk]][["capacity"]]
+  new_outcomes[["stock_remaining"]] <-
+    unlist(stock[[wk + 1]]) %>% sum
+  new_outcomes[["vaccinations_completed"]] <-
+    vaccinations[[wk]][["administration"]][["pfizer_second"]] +
+    vaccinations[[wk]][["administration"]][["moderna_second"]] +
+    vaccinations[[wk]][["administration"]][["jj"]]
+  
+  return(new_outcomes)
+}
+
+## -- CREATE OUTCOMES TABLE -- ##
+create_outcomes_table = function(outcomes, stock, deliveries, start_date){
+  data_table <- tibble(wk = 1:weeks,
+                      date = ymd(start_date) + weeks(0:(weeks - 1)),
+                      doses_administered_wk = map(outcomes, "doses_administered") %>%
+                        unlist(),
+                      vaccinations_completed_wk = map(outcomes, "vaccinations_completed") %>% 
+                        unlist(),
+                      capacity_wk = map(outcomes, "capacity") %>% unlist,
+                      stock_wk = (map(stock, "moderna") %>% unlist +
+                                  map(stock, "pfizer") %>% unlist +
+                                  map(stock, "jj") %>% unlist)[-1],
+                      stock_pfizer_wk = (map(stock, "pfizer") %>% unlist)[-1],
+                      stock_moderna_wk = (map(stock, "moderna") %>% unlist)[-1],
+                      stock_jj_wk = (map(stock, "jj") %>% unlist)[-1],
+                      deliveries_pfizer_wk = deliveries$pfizer$doses,
+                      deliveries_moderna_wk = deliveries$moderna$doses,
+                      deliveries_jj_wk = deliveries$jj$doses,
+                      doses_administered_tot = doses_administered0 + cumsum(doses_administered_wk),
+                      vaccinations_completed_tot = people_fully_vaccinated0 + cumsum(vaccinations_completed_wk))
+  return(data_table)
+}
+```
+
+## Run Model Excluding Johnson & Johnson Candidate
+
+Run the loop for the number of weeks given at the start with the functions just defined.
+
+```{r withoutjj}
+## -- RUN 1 - BASE CASE -- ##
+capacity <- capacity3
+
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_nojj_base <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+
+## -- RUN 2 - LOW CASE -- ##
+capacity <- capacity25
+
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_nojj_low <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+
+## -- RUN 3 - HIGH CASE -- ##
+capacity <- capacity35
+
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_nojj_high <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+
+```
+
+## Change Model to Include Johnson & Johnson Candidate
+
+Change the delivery schedule for the Johnson & Johnson candidate so that it is not zero and then re-run the model for all three cases.
+
+```{r withjj}
+## -- WITH JOHNSON & JOHNSON SCHEDULE -- ##
+# Current schedule: 7MM by Mar 31, 20MM by Apr 30, 100MM by Jun 30
+doses_weekly_jj_p1 <- 7 * 10 ^ 6 / p1jj
+doses_weekly_jj_p2 <- 13 * 10 ^ 6 / p2jj
+doses_weekly_jj_p3 <- 80 * 10 ^ 6 / p3jj
+deliveries[["jj"]] <- tibble(week = 1:weeks,
+                             doses = c(rep(0, 6),
+                                       rep(doses_weekly_jj_p1, p1jj),
+                                       rep(doses_weekly_jj_p2, p2jj),
+                                       rep(doses_weekly_jj_p3, p3jj),
+                                       rep(0, Endjj)
+                                       ))
+
+## -- RUN 1 - BASE CASE -- ##
+capacity <- capacity3
+# wk <- 21
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_withjj_base <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+
+## -- RUN 2 - LOW CASE -- ##
+capacity <- capacity25
+
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_withjj_low <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+
+## -- RUN 3 - HIGH CASE -- ##
+capacity <- capacity35
+
+for (wk in 1:weeks) {
+  vaccinations[[wk]] <- init_vaccinations(stock, deliveries, capacity, capacityjj, schedule, wk)
+  vaccinations[[wk]][["administration"]] <- 
+    give_vaccinations(vaccinations, capacity, capacityjj, people, stock, deliveries, schedule, wk)
+  schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+  stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+  people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+  outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  if (people[[wk + 1]]$unprotected < 0) {
+    vaccinations[[wk]][["administration"]] <- check_pop_limits(vaccinations, people, wk)
+    schedule[[wk + 1]] <- update_schedule(schedule, vaccinations, wk)
+    stock[[wk + 1]] <- update_stock(stock, vaccinations, deliveries, wk)
+    people[[wk + 1]] <- update_people(people, schedule, vaccinations, US_population, wk)
+    outcomes[[wk]] <- update_outcomes(outcomes, vaccinations, wk)
+  }
+}
+outcomes_table_withjj_high <- create_outcomes_table(outcomes, stock, deliveries, start_date)
+```
+
+## Create Figures
+
+Create Figures 3, 4, 5, and 6 from the report here.
+
+```{r figures}
+## -- FIGURE 3 - STOCK OVER TIME - NO J&J -- ##
+# Create stock over time dataframe to create graph from
+stock_nojj_base <- outcomes_table_nojj_base[, c("date", "stock_wk")] %>%
+  rename(base = stock_wk)
+stock_nojj_low <- outcomes_table_nojj_low[, c("date", "stock_wk")] %>%
+  rename(low = stock_wk)
+stock_nojj_high <- outcomes_table_nojj_high[, c("date", "stock_wk")] %>%
+  rename(high = stock_wk)
+stock_over_time_nojj <- merge(stock_nojj_low, stock_nojj_base)
+stock_over_time_nojj <- merge(stock_over_time_nojj, stock_nojj_high)
+stock_over_time_nojj <- stock_over_time_nojj %>%
+  rename('Max 2.5 million/day' = low, 'Max 3 million/day' = base,
+         'Max 3.5 million/day' = high) %>%
+  select(date, "Max 2.5 million/day", "Max 3 million/day", "Max 3.5 million/day") %>%
+  gather(key = "Scenario", value = "value", -date)
+
+# Create graph
+stock_graph_nojj <- ggplot(stock_over_time_nojj, aes(x=date, y=value)) +
+  geom_line(aes(color = Scenario)) + 
+  geom_point(aes(color=Scenario)) +
+  scale_color_manual(values = c("darkred", "orange", "darkgreen")) +
+  xlab("Date") + ylab("Total Stock") + 
+  theme_few() + scale_y_continuous(labels=comma) + 
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  theme(panel.grid.major.y = element_line(colour="lightgrey", size = .25)) +
+  ggtitle("Total Stock of all Vaccines - Without J&J")
+stock_graph_nojj
+
+## -- FIGURE 4 - PCT POPULATION VACCINATION - NO J&J -- ##
+# Create percent vaccinated variables
+outcomes_table_nojj_base <- outcomes_table_nojj_base %>%
+  mutate(base = vaccinations_completed_tot/US_population)
+outcomes_table_nojj_low <- outcomes_table_nojj_low %>%
+  mutate(low = vaccinations_completed_tot/US_population)
+outcomes_table_nojj_high <- outcomes_table_nojj_high %>%
+  mutate(high = vaccinations_completed_tot/US_population)
+
+# Create a new dataframe with percent vaccinated for graph
+pct_vacc_table_nojj <- outcomes_table_nojj_base[,c("date", "base")]
+pct_vacc_table_nojj <- cbind(pct_vacc_table_nojj, outcomes_table_nojj_low$low)
+pct_vacc_table_nojj <- cbind(pct_vacc_table_nojj, outcomes_table_nojj_high$high)
+pct_vacc_table_nojj <- pct_vacc_table_nojj %>%
+  rename('Max 2.5 million/day' = 'outcomes_table_nojj_low$low', 
+         'Max 3 million/day' = base,
+         'Max 3.5 million/day' = 'outcomes_table_nojj_high$high') %>%
+  select(date, "Max 2.5 million/day", "Max 3 million/day", "Max 3.5 million/day") %>%
+  gather(key = "Scenario", value = "value", -date)
+
+# Create graph
+population_vaccinated_nojj <- ggplot(pct_vacc_table_nojj, aes(x=date, y=value)) +
+  geom_line(aes(color = Scenario)) + 
+  geom_point(aes(color=Scenario)) +
+  scale_color_manual(values = c("darkred", "orange", "darkgreen")) +
+  geom_hline(yintercept = 0.5, color="lightblue", size = 1) +
+  geom_hline(yintercept = 0.75, color="blue", size = 1) +
+  geom_hline(yintercept = 1, color="darkblue", size = 1) +
+  xlab("Date") + ylab("Percent Vaccinated") + 
+  theme_few() + scale_y_continuous(breaks = seq(0, 1, len = 11), labels=percent) + 
+  theme(panel.grid.major.y = element_line(colour="lightgrey", size = .25)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  ggtitle("Percentage of the US Population Vaccinated - Without J&J")
+population_vaccinated_nojj
+
+## -- FIGURE 5 - STOCK OVER TIME - WITH J&J -- ##
+# Create stock over time dataframe to create graph from
+stock_withjj_base <- outcomes_table_withjj_base[, c("date", "stock_wk")] %>%
+  rename(base = stock_wk)
+stock_withjj_low <- outcomes_table_withjj_low[, c("date", "stock_wk")] %>%
+  rename(low = stock_wk)
+stock_withjj_high <- outcomes_table_withjj_high[, c("date", "stock_wk")] %>%
+  rename(high = stock_wk)
+stock_over_time_withjj <- merge(stock_withjj_low, stock_withjj_base)
+stock_over_time_withjj <- merge(stock_over_time_withjj, stock_withjj_high)
+stock_over_time_withjj <- stock_over_time_withjj %>%
+  rename('Max 2.5 million/day' = low, 'Max 3 million/day' = base,
+         'Max 3.5 million/day' = high) %>%
+  select(date, "Max 2.5 million/day", "Max 3 million/day", "Max 3.5 million/day") %>%
+  gather(key = "Scenario", value = "value", -date)
+
+# Create graph
+stock_graph_withjj <- ggplot(stock_over_time_withjj, aes(x=date, y=value)) +
+  geom_line(aes(color = Scenario)) + 
+  geom_point(aes(color=Scenario)) +
+  scale_color_manual(values = c("darkred", "orange", "darkgreen")) +
+  xlab("Date") + ylab("Total Stock") + 
+  theme_few() + scale_y_continuous(labels=comma) + 
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  theme(panel.grid.major.y = element_line(colour="lightgrey", size = .25)) +
+  ggtitle("Total Stock of all Vaccines - Including J&J")
+stock_graph_withjj
+
+## -- FIGURE 6 - PCT POPULATION VACCINATION - WITH J&J -- ##
+# Create percent vaccinated variables
+outcomes_table_withjj_base <- outcomes_table_withjj_base %>%
+  mutate(base = vaccinations_completed_tot/US_population)
+outcomes_table_withjj_low <- outcomes_table_withjj_low %>%
+  mutate(low = vaccinations_completed_tot/US_population)
+outcomes_table_withjj_high <- outcomes_table_withjj_high %>%
+  mutate(high = vaccinations_completed_tot/US_population)
+
+# Create a new dataframe with percent vaccinated for graph
+pct_vacc_table_withjj <- outcomes_table_withjj_base[,c("date", "base")]
+pct_vacc_table_withjj <- cbind(pct_vacc_table_withjj, outcomes_table_withjj_low$low)
+pct_vacc_table_withjj <- cbind(pct_vacc_table_withjj, outcomes_table_withjj_high$high)
+pct_vacc_table_withjj <- pct_vacc_table_withjj %>%
+  rename('Max 2.5 million/day' = 'outcomes_table_withjj_low$low', 
+         'Max 3 million/day' = base,
+         'Max 3.5 million/day' = 'outcomes_table_withjj_high$high') %>%
+  select(date, "Max 2.5 million/day", "Max 3 million/day", "Max 3.5 million/day") %>%
+  gather(key = "Scenario", value = "value", -date)
+
+# Create graph
+population_vaccinated_withjj <- ggplot(pct_vacc_table_withjj, aes(x=date, y=value)) +
+  geom_line(aes(color = Scenario)) + 
+  geom_point(aes(color=Scenario)) +
+  scale_color_manual(values = c("darkred", "orange", "darkgreen")) +
+  geom_hline(yintercept = 0.5, color="lightblue", size = 1) +
+  geom_hline(yintercept = 0.75, color="blue", size = 1) +
+  geom_hline(yintercept = 1, color="darkblue", size = 1) +
+  xlab("Date") + ylab("Percent Vaccinated") + 
+  theme_few() + scale_y_continuous(breaks = seq(0, 1, len = 11), labels=percent) + 
+  theme(panel.grid.major.y = element_line(colour="lightgrey", size = .25)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  ggtitle("Percentage of the US Population Vaccinated - Including J&J")
+population_vaccinated_withjj
+```

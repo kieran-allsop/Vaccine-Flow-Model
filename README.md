@@ -1,6 +1,6 @@
 # Vaccine-Flow-Model
 
-Vaccine-Flow-Model contains R code in a markdown file that replicates all simulations and calculations in the AEI Economic Perspectives paper [Modeling Protection from COVID-19 Based on Vaccine Supply and Administration Rates](https://www.aei.org/research-products/report/modeling-protection-from-covid-19-based-on-vaccine-supply-and-administration-rates/), written by [Kieran Allsop](https://www.aei.org/profile/kieran-allsop/), [Jim Capretta](https://www.aei.org/profile/james-c-capretta/), and [Scott Ganz](https://www.aei.org/profile/scott-c-ganz/).
+Vaccine-Flow-Model contains R code in a markdown file that replicates all simulations and calculations in the AEI Economic Perspectives paper [Modeling Protection from COVID-19 Based on Vaccine Supply and Administration Rates](https://www.aei.org/research-products/report/modeling-protection-from-covid-19-based-on-vaccine-supply-and-administration-rates/), written by [Kieran Allsop](https://www.aei.org/profile/kieran-allsop/), [James Capretta](https://www.aei.org/profile/james-c-capretta/), and [Scott Ganz](https://www.aei.org/profile/scott-c-ganz/).
 
 ## Overview
 

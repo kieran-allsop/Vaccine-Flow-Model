@@ -63,7 +63,7 @@ Data on current vaccination figures is provided by the [CDC](https://covid.cdc.g
 # Read in Moderna shipment schedule
 moderna_shipping <-
   read_csv(
-    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Moderna.csv"
+    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Moderna_0216.csv"
   ) %>%
   filter(Jurisdiction == "Total") %>%
   select(-1,-2) %>%
@@ -72,7 +72,7 @@ moderna_shipping <-
 # Read in Pfizer shipment schedule
 pfizer_shipping <-
   read_csv(
-    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Pfizer.csv"
+    "../data/COVID-19_Vaccine_Distribution_Allocations_by_Jurisdiction_-_Pfizer_0216.csv"
   ) %>%
   filter(Jurisdiction == "Total") %>%
   select(-1,-2) %>%
@@ -90,7 +90,7 @@ schedule[[1]] <- list()
 schedule[[1]][["pfizer"]] <- tibble(week = c(1, 2, 3),
                                     people = pfizer_shipping[, c(14, 16, 18)] %>% unlist(use.names = F))
 schedule[[1]][["moderna"]] <- tibble(week = c(1, 2, 3, 4),
-                                     people = pfizer_shipping[, c(10, 12, 14, 16)] %>% unlist(use.names = F))
+                                     people = moderna_shipping[, c(10, 12, 14, 16)] %>% unlist(use.names = F))
 
 # Input initialization values from the CDC
 # Up to date as of 02/16/21
@@ -201,6 +201,7 @@ owid_data <-
   filter(location == "United States",!is.na(daily_vaccinations)) %>%
   select(date, total_vaccinations, daily_vaccinations) %>%
   filter(date >= ymd("2021-01-01")) %>%
+  filter(date <= ymd("2021-02-16")) %>%
   mutate(day = 1:n())
 
 rate <- coef(lm(daily_vaccinations ~ day, data = owid_data))[2]
